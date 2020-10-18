@@ -9,6 +9,7 @@ Django Rest Framework
 pip install djangorestframework
 pip install markdown
 pip install django-filter
+pip install drf-nested-routers
 ```
 2. Add to `INSTALLED_APPS` at _\<project\>/settings.py_
 ```python
@@ -90,6 +91,63 @@ urlpatterns = [
   path('api-auth/', include('rest_framework.urls', namespace='rest_framework'))
 ]
 ```
+
+### Nested routers
+> https://github.com/alanjds/drf-nested-routers
+
+To install:
+```console
+pip install drf-nested-routers
+```
+#### Normal nested routers
+##### Example
+```python
+# urls.py
+from rest_framework_nested import routers
+from views import DomainViewSet, NameserverViewSet
+(...)
+
+router = routers.SimpleRouter()
+router.register(r'domains', DomainViewSet)
+
+domains_router = routers.NestedSimpleRouter(router, r'domains', lookup='domain')
+domains_router.register(r'nameservers', NameserverViewSet, base_name='domain-nameservers')
+# 'base_name' is optional. Needed only if the same viewset is registered more than once
+# Official DRF docs on this option: http://www.django-rest-framework.org/api-guide/routers/
+
+urlpatterns = patterns('',
+    url(r'^', include(router.urls)),
+    url(r'^', include(domains_router.urls)),
+)
+```
+```python
+# views.py
+
+## For Django' ORM-based resources ##
+
+class NameserverViewSet(viewsets.ModelViewSet):
+    def get_queryset(self):
+        return Nameserver.objects.filter(domain=self.kwargs['domain_pk'])
+
+## OR: non-ORM resources ##
+
+class NameserverViewSet(viewsets.ViewSet):
+    def list(self, request, domain_pk=None):
+        nameservers = self.queryset.filter(domain=domain_pk)
+        (...)
+        return Response([...])
+
+    def retrieve(self, request, pk=None, domain_pk=None):
+        nameservers = self.queryset.get(pk=pk, domain=domain_pk)
+        (...)
+        return Response(serializer.data)
+```
+
+#### Hyperlinks for Nested resources
+
+
+#### Infinite-depth Nesting
+
 
 ## Permissions 
 > https://www.django-rest-framework.org/api-guide/permissions/
@@ -204,7 +262,70 @@ If successfully authenticated, `BasicAuthentication` provides the following cred
 Unauthenticated responses that are denied permission will result in an `HTTP 401 Unauthorized` response with an appropiate WWW-Authenticate header.
 
 ### Token Authentication
-<div style="text-align:center;font-size:1.2rem;font-weight:bold;">Check jwt notes!!</div>
+> https://blog.logrocket.com/jwt-authentication-best-practices/  
+https://www.django-rest-framework.org/api-guide/authentication/  
+https://stackoverflow.com/questions/31600497/django-drf-token-based-authentication-vs-json-web-token
+https://simpleisbetterthancomplex.com/tutorial/2018/11/22/how-to-implement-token-authentication-using-django-rest-framework.html
+
+Token authentication is appropriate for client-server setups, such as native desktop and mobile clients.
+
+#### Installation
+_\<project\>/settings.py_
+```python
+INSTALLED_APPS = [
+  ...
+  'rest_framework.authtoken'
+]
+```
+Remember to do the migrations.
+```console
+python manage.py migrate
+```
+Include the urls in _\<project\>/urls.py_
+```python
+from rest_framework.authtoken.views import obtain_auth_token
+
+urlpatterns = [
+  path("api-token-auth/", obtain_auth_token, name="api_token_auth"),
+]
+```
+For clients to authenticate, the token key should be included in the `Autherization` HTTP header. The key should be prefixed by the string literal "Token", with whitespace separating the 2 strings. For example
+```console
+Authorization: Token 9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b
+```
+**TokenAuthentication** provides the following credentials:
+* `request.user`will be a Django `User`instance.
+* `request.auth`will be a `rest_framework.authtoken.models.Token` instance.
+
+#### Create token for users
+For every user to have an automatically generated Token, use a _post_save_ in the _models.py_ file:
+```python
+from django.conf import settings
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from rest_framework.authtoken.models import Token
+
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def create_auth_token(sender, instance=None, created=False, **kwargs):
+    if created:
+        Token.objects.create(user=instance)
+```
+
+To generate tokens for all existing users:
+```python
+from django.contrib.auth.models import User
+from rest_framework.authtoken.models import Token
+
+for user in User.objects.all():
+  Token.objects.get_or_create(user=user)
+```
+#### Request token
+The API end point is **/api-token-auth/**. This does not handle GET requests. It is a view to receive a POST request with username and password and returns the token.
+
+To request a token:
+```console
+http post http://127.0.0.1:8000/api-token-auth/ username=vitor password=123
+```
 
 ### SessionAuthentication
 This authentication scheme uses Django's default session backend for authentication. This is appropiate for AJAX clients that are running in the same session context as your website.
@@ -244,5 +365,101 @@ HTTP 200 OK{
   ]
 }
 ```
+
+## Testing
+> https://www.django-rest-framework.org/api-guide/testing/
+
+### APIRequestFactory
+Extends Django's existing `RequestFactory`class.
+#### Creating test requests
+The `APIRequestFactory` class supports an almost identical API to Django's standard `RequestFactory` class. This means that the standard `.get()`, `post()`, `put()`, `patch()`, `delete()`, `head()`and `options` methods are all available.
+```python
+from rest_framework.test import APIRequestFactory
+
+factory = APIRequestFactory()
+request = factory.post('/notes/', {'title': 'new idea'})
+```
+
+#### Forcing authentication
+When testing views directly using a request factory, it's often convenient to be able to directly authenticate the request, rather than having a to construct the correct authentication credentials.
+To forcibly authenticate a request, use the `force_authenticate(request, user=None, token=None)` method
+```python
+from rest_framework.test import force_authenticate
+
+factory = APIRequestFactory()
+user = User.objects.get(username="user")
+view = AccountDetail.as_view()
+
+request = factory.get("/accounts/django-superstars/")
+force_authenticate(request, user=user)
+response = view(request)
+```
+**Note: `force_authenticate` directly sets `request.user` to the in-memory `user` instance. If you are re-using the same `user`instance across multiple tests that update the saved `user` state, you may need to call `refresh_from_db()` between tests.**
+
+#### Forcing CSRF validation
+By default, requests created with `APIRequestFactory` will not have CSRF validation applied.
+```python
+factory = APIRequestFactory(enforce_csrf_checks=True)
+```
+
+### APIClient
+#### Making requests
+The `APIClient` class supports the same request interface as Django's standard `Client` class.
+```python
+from rest_framework.test import APIClient
+
+client = APIClient()
+client.post('/notes/', {'title': 'new idea'}, format='json')
+```
+
+#### Authenticating
+##### _.login(**kwargs)_
+The `login` method functions exactly as it does with Django's regular `Client` class.
+```python
+client = APIClient()
+client.login(username='lauren', password='secret')
+client.logout()
+```
+
+##### _.credentials(**kwargs)_
+The `credentials` method can be used to set headers that will then be included on all subsequent requests by the test client.
+```python
+from rest_framework.authtoken.models import Token
+from rest_framework.test import APIClient
+
+token = Token.objects.get(user__username='Juan')
+client = APIClient()
+client.credentials(HTTP_AUTHORIZATION='Token ' + token.key)
+```
+The `credentials` method is appropiate for testing APIs that require authentication headers, such as basic authentication, OAuth1a and OAuth2 authentication, and simple token authentication schemes.
+
+##### _.force_authenticate(user=None, token=None)_
+Sometimes you may want to bypass authentication entirely and force all requests by the test client to be automatically treated as authenticated.
+```python
+user = User.objects.get(username='Juan')
+client = APIClient()
+client.force_authenticate(user=user)
+```
+
+### Example
+```python
+from django.urls import reverse
+from rest_framework import status
+from rest_framework.test import APITestCase
+from myproject.apps.core.models import Account
+
+class AccountTests(APITestCase):
+    def test_create_account(self):
+        """
+        Ensure we can create a new account object.
+        """
+        url = reverse('account-list')
+        data = {'name': 'DabApps'}
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Account.objects.count(), 1)
+        self.assertEqual(Account.objects.get().name, 'DabApps')
+```
+
 
 [django-guardian]: https://github.com/django-guardian/django-guardian
